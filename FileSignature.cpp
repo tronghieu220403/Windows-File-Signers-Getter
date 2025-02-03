@@ -161,7 +161,6 @@ std::vector<std::wstring> FileSignature::GetNameOfCatalogSigners()
     SetFilePointer(file_handle_, 0, nullptr, FILE_BEGIN);
 
     HCATADMIN h_cat_admin = nullptr;
-    HCATINFO h_cat_info = nullptr;
     DWORD result = NULL;
 
     // Create catalog admin context
@@ -179,91 +178,91 @@ std::vector<std::wstring> FileSignature::GetNameOfCatalogSigners()
         return catalog_signers_;
     }
 
-    // Find the catalog file containing the hash
-    h_cat_info = CryptCATAdminEnumCatalogFromHash(h_cat_admin, hash, hash_size, 0, nullptr);
-    if (!h_cat_info) {
-        CryptCATAdminReleaseContext(h_cat_admin, 0);
-        catalog_trusted_ = 1;
-        return catalog_signers_;
-    }
+    HCATINFO h_cat_info = nullptr;
 
-    // Verify the catalog file signature
-    CATALOG_INFO catalog_info = { 0 };
-    catalog_info.cbStruct = sizeof(catalog_info);
-    if (CryptCATCatalogInfoFromContext(h_cat_info, &catalog_info, 0))
+    catalog_trusted_ = 1;
+
+    std::set<std::wstring> catalog_signers_set;
+
+    while (true)
     {
-        WINTRUST_DATA wintrust_data = { 0 };
-        WINTRUST_CATALOG_INFO wintrust_catalog_info = { 0 };
-
-        wintrust_data.cbStruct = sizeof(wintrust_data);
-        wintrust_data.dwStateAction = WTD_STATEACTION_VERIFY;
-        wintrust_data.dwUIChoice = WTD_UI_NONE;
-        wintrust_data.fdwRevocationChecks = WTD_REVOKE_NONE;
-        wintrust_data.dwUnionChoice = WTD_CHOICE_CATALOG;
-        wintrust_data.pCatalog = &wintrust_catalog_info;
-
-        wintrust_catalog_info.cbStruct = sizeof(wintrust_catalog_info);
-        wintrust_catalog_info.pcwszCatalogFilePath = catalog_info.wszCatalogFile;
-        wintrust_catalog_info.pcwszMemberFilePath = file_path_.c_str();
-        wintrust_catalog_info.pcwszMemberTag = std::filesystem::path(file_path_).filename().c_str();
-        wintrust_catalog_info.pbCalculatedFileHash = hash;
-        wintrust_catalog_info.cbCalculatedFileHash = hash_size;
-
-        WINTRUST_SIGNATURE_SETTINGS signature_settings = {};
-        signature_settings.cbStruct = sizeof(WINTRUST_SIGNATURE_SETTINGS);
-        signature_settings.dwFlags = WSS_GET_SECONDARY_SIG_COUNT | WSS_VERIFY_SPECIFIC;
-        signature_settings.dwIndex = 0;
-        wintrust_data.pSignatureSettings = &signature_settings;
-
-        GUID generic_action_id = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-        result = WinVerifyTrust(nullptr, &generic_action_id, &wintrust_data);
-        auto wintrust_called = true;
-        if (result == ERROR_SUCCESS)
+        // Query the catalog file containing the hash
+        h_cat_info = CryptCATAdminEnumCatalogFromHash(h_cat_admin, hash, hash_size, 0, &h_cat_info);
+        if (h_cat_info == NULL)
         {
-            for (DWORD i = 0; i <= wintrust_data.pSignatureSettings->cSecondarySigs; ++i) {
-                wintrust_data.dwStateAction = WTD_STATEACTION_CLOSE;
-                WinVerifyTrust(nullptr, &generic_action_id, &wintrust_data);
+            if (h_cat_admin)
+            {
+                CryptCATAdminReleaseCatalogContext(h_cat_admin, h_cat_info, 0);
+            }
+            break;
+        }
+        else
+        {
+            // Verify the catalog file signature
+            CATALOG_INFO catalog_info = { 0 };
+            catalog_info.cbStruct = sizeof(catalog_info);
+            if (CryptCATCatalogInfoFromContext(h_cat_info, &catalog_info, 0))
+            {
+                WINTRUST_DATA wintrust_data = { 0 };
+                WINTRUST_CATALOG_INFO wintrust_catalog_info = { 0 };
 
-                wintrust_data.hWVTStateData = nullptr;
+                wintrust_data.cbStruct = sizeof(wintrust_data);
                 wintrust_data.dwStateAction = WTD_STATEACTION_VERIFY;
-                wintrust_data.pSignatureSettings->dwIndex = i;
-                result = WinVerifyTrust(nullptr, &generic_action_id, &wintrust_data);
+                wintrust_data.dwUIChoice = WTD_UI_NONE;
+                wintrust_data.fdwRevocationChecks = WTD_REVOKE_NONE;
+                wintrust_data.dwUnionChoice = WTD_CHOICE_CATALOG;
+                wintrust_data.pCatalog = &wintrust_catalog_info;
 
-                if (result == ERROR_SUCCESS) {
+                wintrust_catalog_info.cbStruct = sizeof(wintrust_catalog_info);
+                wintrust_catalog_info.pcwszCatalogFilePath = catalog_info.wszCatalogFile;
+                wintrust_catalog_info.pcwszMemberFilePath = file_path_.c_str();
+                wintrust_catalog_info.pcwszMemberTag = std::filesystem::path(file_path_).filename().c_str();
+                wintrust_catalog_info.pbCalculatedFileHash = hash;
+                wintrust_catalog_info.cbCalculatedFileHash = hash_size;
+
+                WINTRUST_SIGNATURE_SETTINGS signature_settings = {};
+                signature_settings.cbStruct = sizeof(WINTRUST_SIGNATURE_SETTINGS);
+                signature_settings.dwFlags = WSS_VERIFY_SPECIFIC;
+                signature_settings.dwIndex = 0;
+                wintrust_data.pSignatureSettings = &signature_settings;
+
+                GUID generic_action_id = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+                result = WinVerifyTrust(nullptr, &generic_action_id, &wintrust_data);
+                if (result == ERROR_SUCCESS)
+                {
                     CRYPT_PROVIDER_DATA* p_crypt_prov_data = WTHelperProvDataFromStateData(wintrust_data.hWVTStateData);
                     CRYPT_PROVIDER_SGNR* p_signer = WTHelperGetProvSignerFromChain(p_crypt_prov_data, 0, FALSE, 0);
                     CRYPT_PROVIDER_CERT* p_cert = WTHelperGetProvCertFromChain(p_signer, 0);
 
-                    if (p_cert) {
+                    if (p_cert)
+                    {
                         int length = CertGetNameStringW(p_cert->pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, nullptr, 0);
-                        if (length > 0) {
+                        if (length > 0)
+                        {
                             std::vector<wchar_t> buffer(length);
-                            if (CertGetNameStringW(p_cert->pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, buffer.data(), length)) {
-                                catalog_signers_.emplace_back(buffer.data());
+                            if (CertGetNameStringW(p_cert->pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, buffer.data(), length))
+                            {
+                                catalog_signers_set.insert((wchar_t *)buffer.data());
+                                catalog_trusted_ = 2;
                             }
                         }
                     }
-                }
-                else {
-                    break;
+                    wintrust_data.dwStateAction = WTD_STATEACTION_CLOSE;
+                    WinVerifyTrust(nullptr, &generic_action_id, &wintrust_data);
                 }
             }
-            catalog_trusted_ = 2;
-        }
-        else
-        {
-            catalog_trusted_ = 1;
-        }
-
-        if (wintrust_called) {
-            wintrust_data.dwStateAction = WTD_STATEACTION_CLOSE;
-            WinVerifyTrust(nullptr, &generic_action_id, &wintrust_data);
         }
     }
-
-    // Release resources
-    if (h_cat_info) CryptCATAdminReleaseCatalogContext(h_cat_admin, h_cat_info, 0);
+    
     if (h_cat_admin) CryptCATAdminReleaseContext(h_cat_admin, 0);
 
+    for (const auto& s : catalog_signers_set)
+    {
+        catalog_signers_.push_back(s);
+    }
+
     return catalog_signers_;
+
+    // Other code for getting catalog signers
+    // https://chromium.googlesource.com/chromium/src/+/master/chrome/browser/win/conflicts/module_info_util.cc
 }

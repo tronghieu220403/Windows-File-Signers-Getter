@@ -12,6 +12,7 @@
 #include <string>
 #include <atlstr.h>
 #include <chrono>
+#include <set>
 
 using namespace std;
 namespace fs = std::filesystem;
